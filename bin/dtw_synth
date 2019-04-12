@@ -1,0 +1,130 @@
+#!/usr/bin/python -u
+
+"""Time-warps a speech parameter sequence based on a reference."""
+
+# Copyright 2014, 2015, 2016, 2017 Matt Shannon
+
+# This file is part of mcd.
+# See `License` for details of license and warranty.
+
+import os
+import sys
+import argparse
+import math
+import numpy as np
+
+from htk_io.base import DirReader
+import htk_io.vecseq as vsio
+
+from mcd import util
+from mcd import dtw
+import mcd.metrics_fast as mt
+
+def main(rawArgs):
+    parser = argparse.ArgumentParser(
+        description=(
+            'Time-warps a speech parameter sequence based on a reference.'
+            ' Dynamic time warping (DTW) is used to compute the time warping.'
+            ' By default a speech parameter sequence consisting of three'
+            ' portions (mgc,lf0,bap) is warped to match the timing of the'
+            ' reference speech parameter sequence.'
+            ' Only the first portion is used when computing the warping.'
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        '--exts', dest='exts', default='mgc,lf0,bap', metavar='EXTLIST',
+        help=(
+            'file extensions added to uttId to get file containing speech'
+            ' parameters'
+        )
+    )
+    parser.add_argument(
+        '--param_orders', dest='paramOrders', default='60,1,5',
+        metavar='ORDERLIST',
+        help='orders of the parameter files (mgc,lf0,bap)'
+    )
+    parser.add_argument(
+        dest='natDir', metavar='NATDIR',
+        help='directory containing natural speech parameters'
+    )
+    parser.add_argument(
+        dest='synthDir', metavar='SYNTHDIR',
+        help='directory containing synthetic speech parameters'
+    )
+    parser.add_argument(
+        dest='outDir', metavar='OUTDIR',
+        help='directory to output warped speech parameters to'
+    )
+    parser.add_argument(
+        dest='uttIds', metavar='UTTID', nargs='+',
+        help='utterance ids (ext will be appended to these)'
+    )
+    args = parser.parse_args(rawArgs[1:])
+
+    costFn = mt.logSpecDbDist
+
+    paramOrders = [
+        int(paramOrderStr)
+        for paramOrderStr in args.paramOrders.split(',')
+    ]
+    assert paramOrders
+    mgcParamOrder = paramOrders[0]
+
+    exts = args.exts.split(',')
+    assert len(exts) == len(paramOrders)
+    mgcExt = exts[0]
+
+    vecSeqIo = vsio.VecSeqIo(mgcParamOrder)
+    getNatVecSeq = DirReader(vecSeqIo, args.natDir, mgcExt)
+    getSynthVecSeq = DirReader(vecSeqIo, args.synthDir, mgcExt)
+
+    minCostTot = 0.0
+    framesTot = 0
+    for iId in range(len(args.uttIds)):
+	uttId = args.uttIds[iId]
+	idArray = uttId.split('+')
+        print 'processing', args.natDir + '/' + idArray[1] + ' VS ' + args.synthDir + '/' + idArray[0]
+        #nat = getNatVecSeq(uttId)
+        #synth = getSynthVecSeq(uttId)
+	nat = getNatVecSeq(idArray[1])
+	synth = getSynthVecSeq(idArray[0])
+        # ignore 0th cepstral component
+        nat = nat[:, 1:]
+        synth = synth[:, 1:]
+
+        minCost, path = dtw.dtw(nat, synth, costFn)
+        frames = len(nat)
+
+        minCostTot += minCost
+        framesTot += frames
+
+        print 'MCD = %f (%d frames)' % (minCost / frames, frames)
+
+        pathCosts = [ costFn(nat[i], synth[j]) for i, j in path ]
+        synthIndexSeq = dtw.projectPathBestCost(path, pathCosts)
+        assert len(synthIndexSeq) == len(nat)
+
+        uniqueFrames = len(set(synthIndexSeq))
+        repeatedFrames = len(synthIndexSeq) - uniqueFrames
+        droppedFrames = len(synth) - uniqueFrames
+        assert len(synth) - droppedFrames + repeatedFrames == len(nat)
+        print ('warping %s frames -> %s frames (%s repeated, %s dropped)' %
+               (len(synth), len(nat), repeatedFrames, droppedFrames))
+        print
+
+        for paramOrder, ext in zip(paramOrders, exts):
+            vecSeqIo = vsio.VecSeqIo(paramOrder)
+
+            synthFullFile = os.path.join(args.synthDir, idArray[0] + '.'+ext)
+            synthFull = vecSeqIo.readFile(synthFullFile)
+
+            synthFullWarped = dtw.warpGeneral(synthFull, synthIndexSeq)
+
+            synthFullWarpedFile = os.path.join(args.outDir, idArray[0] + '.'+ext)
+            vecSeqIo.writeFile(synthFullWarpedFile, synthFullWarped)
+
+    print 'overall MCD = %f (%d frames)' % (minCostTot / framesTot, framesTot)
+
+if __name__ == '__main__':
+    main(sys.argv)

@@ -1,0 +1,7 @@
+include License
+include README.rst
+include requirements.txt
+include mcd/*.c
+include bin/test_cli.py
+recursive-include test_data *
+include example_usage
